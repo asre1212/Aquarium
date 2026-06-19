@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0d4b57">
+    <title>Freshwater Log</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Freshwater</p>
+          <h1>Aquarium Log</h1>
+        </div>
+        <div class="header-actions">
+          <button class="icon-button" id="hardUpdate" type="button" aria-label="Hard update from GitHub" title="Hard update from GitHub">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.4 6.4M3 12A9 9 0 0 1 18.4 5.6M18 2v4h-4M6 22v-4h4"/></svg>
+          </button>
+          <button class="icon-button" id="exportData" type="button" aria-label="Export data" title="Export data">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero-panel" aria-label="Aquarium status">
+          <canvas id="waterScene" width="740" height="260" aria-hidden="true"></canvas>
+          <div class="status-strip">
+            <div>
+              <span class="status-label">Latest</span>
+              <strong id="latestSummary">No readings</strong>
+            </div>
+            <div>
+              <span class="status-label">Parameters</span>
+              <strong id="parameterCount">0</strong>
+            </div>
+            <div>
+              <span class="status-label">Events</span>
+              <strong id="eventCount">0</strong>
+            </div>
+          </div>
+        </section>
+
+        <nav class="tabs" aria-label="Views">
+          <button class="tab active" type="button" data-tab="log">Log</button>
+          <button class="tab" type="button" data-tab="charts">Charts</button>
+          <button class="tab" type="button" data-tab="timeline">Timeline</button>
+          <button class="tab" type="button" data-tab="notes">Notes</button>
+        </nav>
+
+        <section class="view active" id="logView">
+          <form class="panel stack" id="parameterForm" autocomplete="off">
+            <div class="section-heading">
+              <h2>Parameter</h2>
+              <button class="text-button" type="submit">Add</button>
+            </div>
+            <label>
+              <span>Name</span>
+              <input id="paramName" autocomplete="off" placeholder="Ammonia" required>
+            </label>
+            <div class="field-row">
+              <label>
+                <span>Low</span>
+                <input id="paramLow" inputmode="decimal" type="number" step="any" placeholder="0">
+              </label>
+              <label>
+                <span>High</span>
+                <input id="paramHigh" inputmode="decimal" type="number" step="any" placeholder="0.25">
+              </label>
+            </div>
+            <label>
+              <span>Units</span>
+              <input id="paramUnit" autocomplete="off" placeholder="ppm">
+            </label>
+          </form>
+
+          <form class="panel stack" id="readingForm">
+            <div class="section-heading">
+              <h2>Reading</h2>
+              <button class="text-button" type="submit">Save</button>
+            </div>
+            <label>
+              <span>Date</span>
+              <input id="readingDate" type="date" required>
+            </label>
+            <div class="reading-grid" id="readingInputs"></div>
+          </form>
+
+          <div class="panel stack">
+            <div class="section-heading">
+              <h2>Parameters</h2>
+            </div>
+            <div class="parameter-list" id="parameterList"></div>
+          </div>
+        </section>
+
+        <section class="view" id="chartsView">
+          <div class="panel chart-panel">
+            <div class="section-heading">
+              <h2>Trends</h2>
+              <select id="chartWindow" aria-label="Chart window">
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+                <option value="365">1 year</option>
+                <option value="all">All</option>
+              </select>
+            </div>
+            <canvas id="trendChart" width="720" height="420"></canvas>
+          </div>
+          <div class="panel">
+            <div class="section-heading">
+              <h2>History</h2>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="historyTable"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="timelineView">
+          <form class="panel stack" id="eventForm">
+            <div class="section-heading">
+              <h2>Event</h2>
+              <button class="text-button" type="submit">Add</button>
+            </div>
+            <label>
+              <span>Date</span>
+              <input id="eventDate" type="date" required>
+            </label>
+            <label>
+              <span>Title</span>
+              <input id="eventTitle" autocomplete="off" placeholder="Water change" required>
+            </label>
+            <label>
+              <span>Details</span>
+              <textarea id="eventDetails" rows="3" placeholder="50% change, cleaned filter"></textarea>
+            </label>
+          </form>
+          <div class="panel">
+            <div class="section-heading">
+              <h2>Timeline</h2>
+            </div>
+            <ol class="timeline" id="timelineList"></ol>
+          </div>
+        </section>
+
+        <section class="view" id="notesView">
+          <div class="panel stack">
+            <div class="section-heading">
+              <h2>Notes</h2>
+              <span id="notesSaved" class="save-state">Saved</span>
+            </div>
+            <textarea id="notesArea" class="notes-area" rows="14" placeholder="Observations, feeding changes, fish behavior"></textarea>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
