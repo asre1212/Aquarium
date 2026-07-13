@@ -35,7 +35,7 @@
 
       <main>
         <section class="hero-panel" aria-label="Aquarium status">
-          <canvas id="waterScene" width="740" height="260" aria-hidden="true"></canvas>
+          <canvas id="waterScene" width="740" height="110" aria-hidden="true"></canvas>
           <div class="status-strip">
             <div>
               <span class="status-label">Latest</span>
@@ -54,15 +54,39 @@
 
         <nav class="tabs" aria-label="Views">
           <button class="tab active" type="button" data-tab="log">Log</button>
-          <button class="tab" type="button" data-tab="charts">Charts</button>
           <button class="tab" type="button" data-tab="timeline">Timeline</button>
           <button class="tab" type="button" data-tab="notes">Notes</button>
         </nav>
 
         <section class="view active" id="logView">
+          <form class="panel stack" id="readingForm">
+            <div class="section-heading">
+              <h2>Reading</h2>
+              <button class="text-button" type="submit">Save</button>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Date</span>
+                <input id="readingDate" type="date" required>
+              </label>
+              <label>
+                <span>Time</span>
+                <input id="readingTime" type="time">
+              </label>
+            </div>
+            <div class="reading-grid" id="readingInputs"></div>
+          </form>
+
+          <div class="panel stack">
+            <div class="section-heading">
+              <h2>Parameters</h2>
+            </div>
+            <div class="parameter-list" id="parameterList"></div>
+          </div>
+
           <form class="panel stack" id="parameterForm" autocomplete="off">
             <div class="section-heading">
-              <h2>Parameter</h2>
+              <h2>New parameter</h2>
               <button class="text-button" type="submit">Add</button>
             </div>
             <label>
@@ -84,71 +108,53 @@
               <input id="paramUnit" autocomplete="off" placeholder="ppm">
             </label>
           </form>
-
-          <form class="panel stack" id="readingForm">
-            <div class="section-heading">
-              <h2>Reading</h2>
-              <button class="text-button" type="submit">Save</button>
-            </div>
-            <label>
-              <span>Date</span>
-              <input id="readingDate" type="date" required>
-            </label>
-            <div class="reading-grid" id="readingInputs"></div>
-          </form>
-
-          <div class="panel stack">
-            <div class="section-heading">
-              <h2>Parameters</h2>
-            </div>
-            <div class="parameter-list" id="parameterList"></div>
-          </div>
-        </section>
-
-        <section class="view" id="chartsView">
-          <div class="panel chart-panel">
-            <div class="section-heading">
-              <h2>Trends</h2>
-              <select id="chartWindow" aria-label="Chart window">
-                <option value="30">30 days</option>
-                <option value="90">90 days</option>
-                <option value="365">1 year</option>
-                <option value="all">All</option>
-              </select>
-            </div>
-            <canvas id="trendChart" width="720" height="420"></canvas>
-          </div>
-          <div class="panel">
-            <div class="section-heading">
-              <h2>History</h2>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Parameter</th>
-                    <th>Value</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="historyTable"></tbody>
-              </table>
-            </div>
-          </div>
         </section>
 
         <section class="view" id="timelineView">
+          <div class="panel">
+            <div class="section-heading">
+              <h2>Parameters</h2>
+            </div>
+            <div class="table-wrap">
+              <table class="summary-table">
+                <thead>
+                  <tr>
+                    <th>Parameter</th>
+                    <th>Latest</th>
+                    <th>Status</th>
+                    <th>Trend</th>
+                  </tr>
+                </thead>
+                <tbody id="parameterSummaryTable"></tbody>
+              </table>
+            </div>
+          </div>
+
           <form class="panel stack" id="eventForm">
             <div class="section-heading">
               <h2>Event</h2>
               <button class="text-button" type="submit">Add</button>
             </div>
             <label>
-              <span>Date</span>
-              <input id="eventDate" type="date" required>
+              <span>Type</span>
+              <select id="eventType">
+                <option value="waterChange">Water change</option>
+                <option value="dosing">Dosing (GH/KH/ferts)</option>
+                <option value="feeding">Feeding</option>
+                <option value="maintenance">Maintenance</option>
+                <option value="other">Other</option>
+              </select>
             </label>
+            <div class="field-row">
+              <label>
+                <span>Date</span>
+                <input id="eventDate" type="date" required>
+              </label>
+              <label>
+                <span>Time</span>
+                <input id="eventTime" type="time">
+              </label>
+            </div>
             <label>
               <span>Title</span>
               <input id="eventTitle" autocomplete="off" placeholder="Water change" required>
@@ -158,9 +164,13 @@
               <textarea id="eventDetails" rows="3" placeholder="50% change, cleaned filter"></textarea>
             </label>
           </form>
+
           <div class="panel">
             <div class="section-heading">
               <h2>Timeline</h2>
+              <button class="icon-button danger" id="resetTimeline" type="button" aria-label="Delete entire timeline" title="Delete entire timeline">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>
+              </button>
             </div>
             <ol class="timeline" id="timelineList"></ol>
           </div>
