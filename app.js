@@ -1,5 +1,7 @@
 const STORAGE_KEY = "freshwater-log:v1";
 const COLORS = ["#0d6f77", "#df6b57", "#4b7dbd", "#d69b35", "#7c5fb2", "#318765", "#b6537c"];
+const TIMELINE_PAGE = 20;
+const TEST_TIMERS = ["Ammonia", "Nitrite", "Nitrate"];
 
 const EVENT_TYPES = {
   waterChange: {
@@ -30,9 +32,21 @@ const EVENT_TYPES = {
 };
 
 const READING_ICON = '<path d="M4 19h16M4 15l4-4 4 3 4-6 4 3"/>';
+const TRASH_ICON = '<path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/>';
+const EDIT_ICON = '<path d="M12 20h9M16.7 3.3a2.2 2.2 0 0 1 3.1 3.1L7 19.2 3 20l.8-4L16.7 3.3z"/>';
+const REPEAT_ICON = '<path d="M17 1l4 4-4 4M21 5H7a4 4 0 0 0-4 4v2m4 12-4-4 4-4M3 19h14a4 4 0 0 0 4-4v-2"/>';
+const CLOSE_ICON = '<path d="M6 6l12 12M18 6 6 18"/>';
 const TREND_ICON = { up: "▲", down: "▼", flat: "▬" };
 
 const state = loadState();
+
+let editingReadingId = null;
+let editingEventId = null;
+let expandedParamId = null;
+let timelineShown = TIMELINE_PAGE;
+let activeTimers = [];
+let undoSnapshot = null;
+let toastTimer = null;
 
 const els = {
   tabs: document.querySelectorAll(".tab"),
@@ -44,9 +58,13 @@ const els = {
   readingInputs: document.getElementById("readingInputs"),
   readingDate: document.getElementById("readingDate"),
   readingTime: document.getElementById("readingTime"),
+  saveReadingButton: document.getElementById("saveReadingButton"),
+  cancelReadingEdit: document.getElementById("cancelReadingEdit"),
   eventDate: document.getElementById("eventDate"),
   eventTime: document.getElementById("eventTime"),
   eventType: document.getElementById("eventType"),
+  eventSubmitButton: document.getElementById("eventSubmitButton"),
+  cancelEventEdit: document.getElementById("cancelEventEdit"),
   parameterSummaryTable: document.getElementById("parameterSummaryTable"),
   timelineList: document.getElementById("timelineList"),
   resetTimeline: document.getElementById("resetTimeline"),
@@ -54,10 +72,18 @@ const els = {
   notesSaved: document.getElementById("notesSaved"),
   latestSummary: document.getElementById("latestSummary"),
   parameterCount: document.getElementById("parameterCount"),
-  eventCount: document.getElementById("eventCount"),
+  lastWaterChange: document.getElementById("lastWaterChange"),
   hardUpdate: document.getElementById("hardUpdate"),
+  importData: document.getElementById("importData"),
+  importFile: document.getElementById("importFile"),
   exportData: document.getElementById("exportData"),
-  waterScene: document.getElementById("waterScene")
+  waterScene: document.getElementById("waterScene"),
+  timerMinutes: document.getElementById("timerMinutes"),
+  timerButtons: document.getElementById("timerButtons"),
+  timerList: document.getElementById("timerList"),
+  toast: document.getElementById("toast"),
+  toastMessage: document.getElementById("toastMessage"),
+  toastUndo: document.getElementById("toastUndo")
 };
 
 initialise();
@@ -81,11 +107,25 @@ function initialise() {
   els.parameterForm.addEventListener("submit", addParameter);
   els.readingForm.addEventListener("submit", addReading);
   els.eventForm.addEventListener("submit", addEvent);
+  els.cancelReadingEdit.addEventListener("click", cancelReadingEdit);
+  els.cancelEventEdit.addEventListener("click", cancelEventEdit);
   els.hardUpdate.addEventListener("click", hardUpdate);
+  els.importData.addEventListener("click", () => els.importFile.click());
+  els.importFile.addEventListener("change", importData);
   els.exportData.addEventListener("click", exportData);
   els.resetTimeline.addEventListener("click", resetTimeline);
   els.notesArea.addEventListener("input", saveNotes);
+  els.toastUndo.addEventListener("click", undoLastAction);
 
+  els.timerButtons.innerHTML = TEST_TIMERS.map((name) => `
+    <button type="button" class="timer-chip" data-timer="${name}">${name}</button>
+  `).join("");
+  els.timerButtons.querySelectorAll("[data-timer]").forEach((button) => {
+    button.addEventListener("click", () => startTimer(button.dataset.timer));
+  });
+  setInterval(tickTimers, 250);
+
+  registerServiceWorker();
   animateWater();
   render();
 }
@@ -99,7 +139,14 @@ function loadState() {
   };
 
   try {
-    return { ...fallback, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") };
+    const merged = { ...fallback, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") };
+    merged.readings = (merged.readings || []).map((reading) => ({ time: "12:00", ...reading }));
+    merged.events = (merged.events || []).map((event) => ({
+      time: "12:00",
+      ...event,
+      type: EVENT_TYPES[event.type] ? event.type : "other"
+    }));
+    return merged;
   } catch {
     return fallback;
   }
@@ -126,6 +173,41 @@ function activateTab(name) {
   els.views.forEach((view) => view.classList.toggle("active", view.id === `${name}View`));
 }
 
+/* ---------- undo ---------- */
+
+function captureUndo(message) {
+  undoSnapshot = JSON.parse(JSON.stringify({
+    parameters: state.parameters,
+    readings: state.readings,
+    events: state.events,
+    notes: state.notes
+  }));
+  els.toastMessage.textContent = message;
+  els.toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 6000);
+}
+
+function hideToast() {
+  els.toast.hidden = true;
+  undoSnapshot = null;
+}
+
+function undoLastAction() {
+  if (undoSnapshot) {
+    state.parameters = undoSnapshot.parameters;
+    state.readings = undoSnapshot.readings;
+    state.events = undoSnapshot.events;
+    state.notes = undoSnapshot.notes;
+    els.notesArea.value = state.notes || "";
+    persist();
+    render();
+  }
+  hideToast();
+}
+
+/* ---------- add / edit / delete ---------- */
+
 function addParameter(event) {
   event.preventDefault();
   const name = document.getElementById("paramName").value.trim();
@@ -149,72 +231,162 @@ function addParameter(event) {
   render();
 }
 
-function addReading(event) {
-  event.preventDefault();
+function readingValuesFromForm() {
   const values = {};
   state.parameters.forEach((parameter) => {
     const input = document.getElementById(`reading-${parameter.id}`);
     const value = numberOrNull(input?.value);
     if (value !== null) values[parameter.id] = value;
   });
+  return values;
+}
 
+function addReading(event) {
+  event.preventDefault();
+  const values = readingValuesFromForm();
   if (!Object.keys(values).length) return;
 
-  state.readings.push({
-    id: uid(),
-    date: els.readingDate.value || today(),
-    time: els.readingTime.value || nowTime(),
-    values
-  });
+  const date = els.readingDate.value || today();
+  const time = els.readingTime.value || nowTime();
 
+  if (editingReadingId) {
+    const reading = state.readings.find((item) => item.id === editingReadingId);
+    if (reading) {
+      reading.date = date;
+      reading.time = time;
+      reading.values = values;
+    }
+    cancelReadingEdit();
+  } else {
+    state.readings.push({ id: uid(), date, time, values });
+    els.readingForm.reset();
+    els.readingDate.value = today();
+    els.readingTime.value = nowTime();
+  }
+
+  persist();
+  render();
+}
+
+function startEditReading(id) {
+  const reading = state.readings.find((item) => item.id === id);
+  if (!reading) return;
+
+  editingReadingId = id;
+  activateTab("log");
+  renderReadingInputs();
+  els.readingDate.value = reading.date;
+  els.readingTime.value = reading.time || "12:00";
+  state.parameters.forEach((parameter) => {
+    const input = document.getElementById(`reading-${parameter.id}`);
+    if (input && reading.values[parameter.id] !== undefined) input.value = reading.values[parameter.id];
+  });
+  els.saveReadingButton.textContent = "Update";
+  els.cancelReadingEdit.hidden = false;
+  els.readingForm.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function cancelReadingEdit() {
+  editingReadingId = null;
   els.readingForm.reset();
   els.readingDate.value = today();
   els.readingTime.value = nowTime();
-  persist();
-  render();
+  els.saveReadingButton.textContent = "Save";
+  els.cancelReadingEdit.hidden = true;
 }
 
 function addEvent(event) {
   event.preventDefault();
   const title = document.getElementById("eventTitle").value.trim();
   const details = document.getElementById("eventDetails").value.trim();
-  const type = els.eventType.value || "other";
+  const type = EVENT_TYPES[els.eventType.value] ? els.eventType.value : "other";
   if (!title) return;
 
-  state.events.push({
-    id: uid(),
-    date: els.eventDate.value || today(),
-    time: els.eventTime.value || nowTime(),
-    type,
-    title,
-    details
-  });
+  const date = els.eventDate.value || today();
+  const time = els.eventTime.value || nowTime();
 
-  els.eventForm.reset();
-  els.eventDate.value = today();
-  els.eventTime.value = nowTime();
+  if (editingEventId) {
+    const existing = state.events.find((item) => item.id === editingEventId);
+    if (existing) {
+      existing.date = date;
+      existing.time = time;
+      existing.type = type;
+      existing.title = title;
+      existing.details = details;
+    }
+    cancelEventEdit();
+  } else {
+    state.events.push({ id: uid(), date, time, type, title, details });
+    els.eventForm.reset();
+    els.eventDate.value = today();
+    els.eventTime.value = nowTime();
+  }
+
   persist();
   render();
 }
 
-function deleteParameter(id) {
-  const index = state.parameters.findIndex((parameter) => parameter.id === id);
-  if (index === -1) return;
+function startEditEvent(id) {
+  const item = state.events.find((entry) => entry.id === id);
+  if (!item) return;
 
-  state.parameters.splice(index, 1);
+  editingEventId = id;
+  els.eventType.value = item.type;
+  els.eventDate.value = item.date;
+  els.eventTime.value = item.time || "12:00";
+  document.getElementById("eventTitle").value = item.title;
+  document.getElementById("eventDetails").value = item.details || "";
+  els.eventSubmitButton.textContent = "Update";
+  els.cancelEventEdit.hidden = false;
+  els.eventForm.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function cancelEventEdit() {
+  editingEventId = null;
+  els.eventForm.reset();
+  els.eventDate.value = today();
+  els.eventTime.value = nowTime();
+  els.eventSubmitButton.textContent = "Add";
+  els.cancelEventEdit.hidden = true;
+}
+
+function repeatEvent(id) {
+  const item = state.events.find((entry) => entry.id === id);
+  if (!item) return;
+
+  cancelEventEdit();
+  els.eventType.value = item.type;
+  els.eventDate.value = today();
+  els.eventTime.value = nowTime();
+  document.getElementById("eventTitle").value = item.title;
+  document.getElementById("eventDetails").value = item.details || "";
+  els.eventForm.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function deleteParameter(id) {
+  const parameter = state.parameters.find((item) => item.id === id);
+  if (!parameter) return;
+
+  captureUndo(`Deleted ${parameter.name}`);
+  state.parameters = state.parameters.filter((item) => item.id !== id);
   state.readings.forEach((reading) => delete reading.values[id]);
   state.readings = state.readings.filter((reading) => Object.keys(reading.values).length);
+  if (expandedParamId === id) expandedParamId = null;
   persist();
   render();
 }
 
 function deleteEvent(id) {
+  captureUndo("Event deleted");
+  if (editingEventId === id) cancelEventEdit();
   state.events = state.events.filter((event) => event.id !== id);
   persist();
   render();
 }
 
 function deleteReading(id) {
+  captureUndo("Reading deleted");
+  if (editingReadingId === id) cancelReadingEdit();
   state.readings = state.readings.filter((reading) => reading.id !== id);
   persist();
   render();
@@ -222,11 +394,15 @@ function deleteReading(id) {
 
 function resetTimeline() {
   if (!state.readings.length && !state.events.length) return;
-  const confirmed = window.confirm("Delete the entire timeline? This removes every reading and event. This cannot be undone.");
+  const confirmed = window.confirm("Delete the entire timeline? This removes every reading and event.");
   if (!confirmed) return;
 
+  captureUndo("Timeline deleted");
+  if (editingReadingId) cancelReadingEdit();
+  if (editingEventId) cancelEventEdit();
   state.readings = [];
   state.events = [];
+  timelineShown = TIMELINE_PAGE;
   persist();
   render();
 }
@@ -236,6 +412,89 @@ function saveNotes() {
   persist();
   els.notesSaved.textContent = "Saved";
 }
+
+/* ---------- test timers ---------- */
+
+function startTimer(label) {
+  const minutes = Math.min(120, Math.max(0.1, numberOrNull(els.timerMinutes.value) ?? 5));
+  activeTimers.push({
+    id: uid(),
+    label,
+    endsAt: Date.now() + minutes * 60000,
+    done: false
+  });
+  renderTimers();
+}
+
+function dismissTimer(id) {
+  activeTimers = activeTimers.filter((timer) => timer.id !== id);
+  renderTimers();
+}
+
+function tickTimers() {
+  if (!activeTimers.length) return;
+  let changed = false;
+  activeTimers.forEach((timer) => {
+    if (!timer.done && timer.endsAt - Date.now() <= 0) {
+      timer.done = true;
+      changed = true;
+      notifyTimerDone();
+    }
+  });
+  renderTimers();
+  if (changed) renderTimers();
+}
+
+function notifyTimerDone() {
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+    oscillator.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    [0, 0.35, 0.7].forEach((offset) => {
+      gain.gain.setValueAtTime(0.22, ctx.currentTime + offset);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + offset + 0.25);
+    });
+    oscillator.start();
+    oscillator.stop(ctx.currentTime + 1.1);
+    oscillator.onended = () => ctx.close();
+  } catch {
+    /* sound unavailable */
+  }
+}
+
+function renderTimers() {
+  if (!activeTimers.length) {
+    els.timerList.innerHTML = "";
+    return;
+  }
+
+  els.timerList.innerHTML = activeTimers.map((timer) => {
+    const remaining = Math.max(0, timer.endsAt - Date.now());
+    const minutes = String(Math.floor(remaining / 60000)).padStart(2, "0");
+    const seconds = String(Math.floor((remaining % 60000) / 1000)).padStart(2, "0");
+    return `
+      <div class="timer-row ${timer.done ? "done" : ""}">
+        <strong>${escapeHtml(timer.label)}</strong>
+        <span class="timer-time">${timer.done ? "Done — read now" : `${minutes}:${seconds}`}</span>
+        <button class="delete-button" type="button" data-dismiss-timer="${timer.id}" aria-label="${timer.done ? "Dismiss" : "Cancel"} ${escapeHtml(timer.label)} timer" title="${timer.done ? "Dismiss" : "Cancel"}">
+          <svg aria-hidden="true" viewBox="0 0 24 24">${CLOSE_ICON}</svg>
+        </button>
+      </div>
+    `;
+  }).join("");
+
+  els.timerList.querySelectorAll("[data-dismiss-timer]").forEach((button) => {
+    button.addEventListener("click", () => dismissTimer(button.dataset.dismissTimer));
+  });
+}
+
+/* ---------- rendering ---------- */
 
 function render() {
   renderSummary();
@@ -248,7 +507,7 @@ function render() {
 function renderSummary() {
   const latest = [...state.readings].sort((a, b) => sortKey(a).localeCompare(sortKey(b)))[state.readings.length - 1];
   els.parameterCount.textContent = state.parameters.length;
-  els.eventCount.textContent = state.events.length;
+  els.lastWaterChange.textContent = formatDaysSinceWaterChange();
 
   if (!latest) {
     els.latestSummary.textContent = "No readings";
@@ -258,6 +517,22 @@ function renderSummary() {
   const firstValue = Object.entries(latest.values)[0];
   const parameter = state.parameters.find((item) => item.id === firstValue?.[0]);
   els.latestSummary.textContent = parameter ? `${parameter.name} ${firstValue[1]}${parameter.unit ? ` ${parameter.unit}` : ""}` : latest.date;
+}
+
+function formatDaysSinceWaterChange() {
+  const latest = state.events
+    .filter((event) => event.type === "waterChange")
+    .map((event) => new Date(`${event.date}T00:00:00`).getTime())
+    .filter((time) => Number.isFinite(time))
+    .sort((a, b) => b - a)[0];
+
+  if (!latest) return "—";
+
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const days = Math.max(0, Math.round((todayStart.getTime() - latest) / 86400000));
+  if (days === 0) return "Today";
+  return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
 function renderParameterList() {
@@ -276,7 +551,7 @@ function renderParameterList() {
           <small>${escapeHtml(range)}</small>
         </div>
         <button class="delete-button" type="button" data-delete-param="${parameter.id}" aria-label="Delete ${escapeHtml(parameter.name)}" title="Delete">
-          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>
+          <svg aria-hidden="true" viewBox="0 0 24 24">${TRASH_ICON}</svg>
         </button>
       </div>
     `;
@@ -305,10 +580,14 @@ function sortKey(item) {
   return `${item.date}T${item.time || "00:00"}`;
 }
 
+function itemTime(item) {
+  return new Date(`${item.date}T${item.time || "12:00"}:00`).getTime();
+}
+
 function parameterSeries(parameterId) {
   return state.readings
     .filter((reading) => reading.values[parameterId] !== undefined)
-    .map((reading) => ({ value: reading.values[parameterId], key: sortKey(reading) }))
+    .map((reading) => ({ value: reading.values[parameterId], time: itemTime(reading), key: sortKey(reading) }))
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
@@ -336,35 +615,56 @@ function renderParameterSummary() {
   els.parameterSummaryTable.innerHTML = state.parameters.map((parameter) => {
     const trend = computeTrend(parameter.id);
     const nameCell = `<span class="swatch-inline" style="background:${parameter.color}"></span>${escapeHtml(parameter.name)}`;
+    const expanded = expandedParamId === parameter.id;
+    const chartRow = expanded ? `
+      <tr class="chart-row">
+        <td colspan="4">
+          <p class="chart-note">Shaded band is the target range · dashed lines mark water changes</p>
+          <canvas id="paramChart-${parameter.id}" class="param-chart"></canvas>
+        </td>
+      </tr>
+    ` : "";
 
     if (!trend) {
       return `
-        <tr>
+        <tr class="param-row" data-param-id="${parameter.id}">
           <td>${nameCell}</td>
           <td colspan="3" class="muted-cell">No readings yet</td>
         </tr>
+        ${chartRow}
       `;
     }
 
     const status = getStatus(parameter, trend.latest);
     return `
-      <tr>
+      <tr class="param-row ${expanded ? "expanded" : ""}" data-param-id="${parameter.id}">
         <td>${nameCell}</td>
-        <td class="latest-cell">
-          <span>${trend.latest}${parameter.unit ? ` ${escapeHtml(parameter.unit)}` : ""}</span>
-          ${sparkline(trend.series, parameter.color)}
-        </td>
+        <td>${trend.latest}${parameter.unit ? ` ${escapeHtml(parameter.unit)}` : ""}</td>
         <td><span class="badge ${status.key}">${status.label}</span></td>
-        <td><span class="trend trend-${trend.direction}" title="${trend.direction}">${TREND_ICON[trend.direction]}</span></td>
+        <td class="trend-cell">${sparkline(trend.series, parameter.color)}<span class="trend trend-${trend.direction}">${TREND_ICON[trend.direction]}</span></td>
       </tr>
+      ${chartRow}
     `;
   }).join("");
+
+  els.parameterSummaryTable.querySelectorAll(".param-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      expandedParamId = expandedParamId === row.dataset.paramId ? null : row.dataset.paramId;
+      renderParameterSummary();
+    });
+  });
+
+  if (expandedParamId) {
+    const parameter = state.parameters.find((item) => item.id === expandedParamId);
+    const canvas = document.getElementById(`paramChart-${expandedParamId}`);
+    if (parameter && canvas) drawParamChart(canvas, parameter);
+  }
 }
 
 function sparkline(values, color) {
   if (values.length < 2) return "";
   const width = 64;
-  const height = 24;
+  const height = 22;
   const pad = 3;
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -378,6 +678,132 @@ function sparkline(values, color) {
 
   return `<svg class="sparkline" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true"><polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
+
+/* ---------- parameter trend chart ---------- */
+
+function drawParamChart(canvas, parameter) {
+  const ctx = canvas.getContext("2d");
+  const scale = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const height = 200;
+  canvas.width = Math.max(280, Math.floor(rect.width * scale));
+  canvas.height = Math.floor(height * scale);
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  const width = canvas.width / scale;
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#f8fbfa";
+  ctx.fillRect(0, 0, width, height);
+
+  const series = parameterSeries(parameter.id);
+  if (!series.length) {
+    drawEmptyChart(ctx, width, height, "No readings yet");
+    return;
+  }
+
+  const padding = { top: 14, right: 14, bottom: 30, left: 44 };
+  let minTime = series[0].time;
+  let maxTime = series[series.length - 1].time;
+  if (minTime === maxTime) {
+    minTime -= 43200000;
+    maxTime += 43200000;
+  }
+
+  let domain = series.map((point) => point.value);
+  if (parameter.low !== null) domain = domain.concat(parameter.low);
+  if (parameter.high !== null) domain = domain.concat(parameter.high);
+  let minValue = Math.min(...domain);
+  let maxValue = Math.max(...domain);
+  if (minValue === maxValue) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+  const spanPad = (maxValue - minValue) * 0.12;
+  minValue -= spanPad;
+  maxValue += spanPad;
+
+  const X = (time) => mapValue(time, minTime, maxTime, padding.left, width - padding.right);
+  const Y = (value) => mapValue(value, minValue, maxValue, height - padding.bottom, padding.top);
+
+  if (parameter.low !== null || parameter.high !== null) {
+    const bandTop = parameter.high !== null ? parameter.high : maxValue;
+    const bandBottom = parameter.low !== null ? parameter.low : minValue;
+    ctx.fillStyle = "rgba(49, 135, 101, 0.13)";
+    ctx.fillRect(padding.left, Y(bandTop), width - padding.left - padding.right, Y(bandBottom) - Y(bandTop));
+  }
+
+  drawGrid(ctx, width, height, padding, minValue, maxValue);
+
+  state.events
+    .filter((event) => event.type === "waterChange")
+    .forEach((event) => {
+      const time = itemTime(event);
+      if (!Number.isFinite(time) || time < minTime || time > maxTime) return;
+      ctx.save();
+      ctx.strokeStyle = "#4b7dbd";
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(X(time), padding.top);
+      ctx.lineTo(X(time), height - padding.bottom);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+  ctx.beginPath();
+  series.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(X(point.time), Y(point.value));
+    else ctx.lineTo(X(point.time), Y(point.value));
+  });
+  ctx.strokeStyle = parameter.color;
+  ctx.lineWidth = 2.4;
+  ctx.stroke();
+
+  series.forEach((point) => {
+    const status = getStatus(parameter, point.value);
+    ctx.beginPath();
+    ctx.arc(X(point.time), Y(point.value), 4, 0, Math.PI * 2);
+    ctx.fillStyle = status.color;
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = "#607174";
+  ctx.font = "11px system-ui";
+  const firstLabel = new Date(minTime).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const lastLabel = new Date(maxTime).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  ctx.fillText(firstLabel, padding.left, height - 10);
+  ctx.fillText(lastLabel, width - padding.right - ctx.measureText(lastLabel).width, height - 10);
+}
+
+function drawGrid(ctx, width, height, padding, minValue, maxValue) {
+  ctx.strokeStyle = "#d9e5e2";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#607174";
+  ctx.font = "11px system-ui";
+
+  for (let i = 0; i <= 4; i += 1) {
+    const y = padding.top + ((height - padding.top - padding.bottom) / 4) * i;
+    const value = maxValue - ((maxValue - minValue) / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(width - padding.right, y);
+    ctx.stroke();
+    ctx.fillText(trimNumber(value), 8, y + 4);
+  }
+}
+
+function drawEmptyChart(ctx, width, height, text) {
+  ctx.fillStyle = "#607174";
+  ctx.font = "14px system-ui";
+  ctx.textAlign = "center";
+  ctx.fillText(text, width / 2, height / 2);
+  ctx.textAlign = "left";
+}
+
+/* ---------- timeline ---------- */
 
 function buildTimelineEntries() {
   const items = [
@@ -422,7 +848,10 @@ function renderTimeline() {
     return;
   }
 
-  els.timelineList.innerHTML = entries.map((entry) => {
+  const visible = entries.slice(0, timelineShown);
+  const remaining = entries.length - visible.length;
+
+  const listHtml = visible.map((entry) => {
     if (entry.kind === "event") {
       const meta = EVENT_TYPES[entry.type] || EVENT_TYPES.other;
       return `
@@ -433,9 +862,17 @@ function renderTimeline() {
             <strong class="timeline-title">${escapeHtml(entry.title)}</strong>
             ${entry.details ? `<p class="timeline-body">${escapeHtml(entry.details)}</p>` : ""}
           </div>
-          <button class="delete-button timeline-delete" type="button" data-delete-event="${entry.id}" aria-label="Delete event" title="Delete">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>
-          </button>
+          <div class="timeline-actions">
+            <button class="delete-button" type="button" data-repeat-event="${entry.id}" aria-label="Repeat event" title="Repeat">
+              <svg aria-hidden="true" viewBox="0 0 24 24">${REPEAT_ICON}</svg>
+            </button>
+            <button class="delete-button" type="button" data-edit-event="${entry.id}" aria-label="Edit event" title="Edit">
+              <svg aria-hidden="true" viewBox="0 0 24 24">${EDIT_ICON}</svg>
+            </button>
+            <button class="delete-button" type="button" data-delete-event="${entry.id}" aria-label="Delete event" title="Delete">
+              <svg aria-hidden="true" viewBox="0 0 24 24">${TRASH_ICON}</svg>
+            </button>
+          </div>
         </li>
       `;
     }
@@ -452,9 +889,14 @@ function renderTimeline() {
         <div class="reading-row">
           <span class="reading-time">${formatTime(reading.time)}</span>
           <div class="value-chips">${chips}</div>
-          <button class="delete-button timeline-delete" type="button" data-delete-reading="${reading.id}" aria-label="Delete reading" title="Delete">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>
-          </button>
+          <div class="reading-actions">
+            <button class="delete-button" type="button" data-edit-reading="${reading.id}" aria-label="Edit reading" title="Edit">
+              <svg aria-hidden="true" viewBox="0 0 24 24">${EDIT_ICON}</svg>
+            </button>
+            <button class="delete-button" type="button" data-delete-reading="${reading.id}" aria-label="Delete reading" title="Delete">
+              <svg aria-hidden="true" viewBox="0 0 24 24">${TRASH_ICON}</svg>
+            </button>
+          </div>
         </div>
       `;
     }).join("");
@@ -470,13 +912,38 @@ function renderTimeline() {
     `;
   }).join("");
 
+  const moreHtml = remaining > 0
+    ? `<li class="timeline-more"><button class="text-button ghost" type="button" id="showMoreTimeline">Show ${remaining} more</button></li>`
+    : "";
+
+  els.timelineList.innerHTML = listHtml + moreHtml;
+
   els.timelineList.querySelectorAll("[data-delete-event]").forEach((button) => {
     button.addEventListener("click", () => deleteEvent(button.dataset.deleteEvent));
+  });
+  els.timelineList.querySelectorAll("[data-edit-event]").forEach((button) => {
+    button.addEventListener("click", () => startEditEvent(button.dataset.editEvent));
+  });
+  els.timelineList.querySelectorAll("[data-repeat-event]").forEach((button) => {
+    button.addEventListener("click", () => repeatEvent(button.dataset.repeatEvent));
   });
   els.timelineList.querySelectorAll("[data-delete-reading]").forEach((button) => {
     button.addEventListener("click", () => deleteReading(button.dataset.deleteReading));
   });
+  els.timelineList.querySelectorAll("[data-edit-reading]").forEach((button) => {
+    button.addEventListener("click", () => startEditReading(button.dataset.editReading));
+  });
+
+  const showMore = document.getElementById("showMoreTimeline");
+  if (showMore) {
+    showMore.addEventListener("click", () => {
+      timelineShown += 30;
+      renderTimeline();
+    });
+  }
 }
+
+/* ---------- hero animation ---------- */
 
 function animateWater() {
   const canvas = els.waterScene;
@@ -567,6 +1034,8 @@ function drawPlant(ctx, x, height, color, frame, scale) {
   }
 }
 
+/* ---------- helpers ---------- */
+
 function getStatus(parameter, value) {
   if (parameter.low !== null && value < parameter.low) return { key: "low", label: "Low", color: "#4b7dbd" };
   if (parameter.high !== null && value > parameter.high) return { key: "high", label: "High", color: "#df6b57" };
@@ -601,6 +1070,15 @@ function numberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function mapValue(value, inMin, inMax, outMin, outMax) {
+  if (inMin === inMax) return (outMin + outMax) / 2;
+  return outMin + ((value - inMin) / (inMax - inMin)) * (outMax - outMin);
+}
+
+function trimNumber(value) {
+  return Number.parseFloat(value.toFixed(2)).toString();
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -609,6 +1087,8 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+/* ---------- import / export ---------- */
 
 function exportData() {
   const payload = JSON.stringify(state, null, 2);
@@ -619,6 +1099,105 @@ function exportData() {
   link.download = `freshwater-log-${today()}.json`;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function sanitizeImport(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  if (!Array.isArray(data.parameters) && !Array.isArray(data.readings) && !Array.isArray(data.events)) return null;
+
+  const parameters = (Array.isArray(data.parameters) ? data.parameters : [])
+    .filter((item) => item && typeof item.name === "string" && item.name.trim())
+    .map((item, index) => ({
+      id: String(item.id || uid()),
+      name: item.name.trim(),
+      low: numberOrNull(item.low),
+      high: numberOrNull(item.high),
+      unit: typeof item.unit === "string" ? item.unit : "",
+      color: typeof item.color === "string" ? item.color : COLORS[index % COLORS.length]
+    }));
+
+  const ids = new Set(parameters.map((item) => item.id));
+
+  const readings = (Array.isArray(data.readings) ? data.readings : [])
+    .filter((item) => item && typeof item.date === "string" && item.values && typeof item.values === "object")
+    .map((item) => {
+      const values = {};
+      Object.entries(item.values).forEach(([key, value]) => {
+        const number = numberOrNull(value);
+        if (number !== null && ids.has(String(key))) values[String(key)] = number;
+      });
+      return {
+        id: String(item.id || uid()),
+        date: item.date,
+        time: typeof item.time === "string" ? item.time : "12:00",
+        values
+      };
+    })
+    .filter((item) => Object.keys(item.values).length);
+
+  const events = (Array.isArray(data.events) ? data.events : [])
+    .filter((item) => item && typeof item.date === "string" && typeof item.title === "string")
+    .map((item) => ({
+      id: String(item.id || uid()),
+      date: item.date,
+      time: typeof item.time === "string" ? item.time : "12:00",
+      type: EVENT_TYPES[item.type] ? item.type : "other",
+      title: item.title,
+      details: typeof item.details === "string" ? item.details : ""
+    }));
+
+  return {
+    parameters,
+    readings,
+    events,
+    notes: typeof data.notes === "string" ? data.notes : state.notes
+  };
+}
+
+async function importData() {
+  const file = els.importFile.files?.[0];
+  els.importFile.value = "";
+  if (!file) return;
+
+  let clean = null;
+  try {
+    clean = sanitizeImport(JSON.parse(await file.text()));
+  } catch {
+    clean = null;
+  }
+
+  if (!clean) {
+    window.alert("That file doesn't look like a Freshwater Log backup.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Import ${clean.parameters.length} parameters, ${clean.readings.length} readings, and ${clean.events.length} events? This replaces the current data.`
+  );
+  if (!confirmed) return;
+
+  captureUndo("Data imported");
+  if (editingReadingId) cancelReadingEdit();
+  if (editingEventId) cancelEventEdit();
+  state.parameters = clean.parameters;
+  state.readings = clean.readings;
+  state.events = clean.events;
+  state.notes = clean.notes;
+  els.notesArea.value = state.notes || "";
+  expandedParamId = null;
+  timelineShown = TIMELINE_PAGE;
+  persist();
+  render();
+}
+
+/* ---------- service worker / updates ---------- */
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  if (!/^https?:$/.test(window.location.protocol)) return;
+  navigator.serviceWorker.register("./sw.js").catch(() => {
+    /* offline support unavailable */
+  });
 }
 
 async function hardUpdate() {
