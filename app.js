@@ -36,7 +36,6 @@ const TRASH_ICON = '<path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/>';
 const EDIT_ICON = '<path d="M12 20h9M16.7 3.3a2.2 2.2 0 0 1 3.1 3.1L7 19.2 3 20l.8-4L16.7 3.3z"/>';
 const REPEAT_ICON = '<path d="M17 1l4 4-4 4M21 5H7a4 4 0 0 0-4 4v2m4 12-4-4 4-4M3 19h14a4 4 0 0 0 4-4v-2"/>';
 const CLOSE_ICON = '<path d="M6 6l12 12M18 6 6 18"/>';
-const TREND_ICON = { up: "▲", down: "▼", flat: "▬" };
 
 const state = loadState();
 
@@ -591,57 +590,107 @@ function parameterSeries(parameterId) {
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-function computeTrend(parameterId) {
+function latestReadingTime(parameterId) {
   const series = parameterSeries(parameterId);
-  if (!series.length) return null;
+  return series.length ? series[series.length - 1].time : null;
+}
 
-  const latest = series[series.length - 1];
-  const previous = series.length > 1 ? series[series.length - 2] : null;
-  let direction = "flat";
-  if (previous) {
-    if (latest.value > previous.value) direction = "up";
-    else if (latest.value < previous.value) direction = "down";
-  }
+// ppm and dKH (and similar) are alternate units for the same reading. Group
+// parameters by their measurement name so only one row is shown per reading.
+function measurementKey(parameter) {
+  const unit = String(parameter.unit || "").trim().toLowerCase();
+  let base = String(parameter.name || "").toLowerCase();
+  base = base.replace(/\([^)]*\)/g, " "); // drop unit annotations like "(dKH)"
+  if (unit) base = base.replaceAll(unit, " ");
+  base = base.replace(/\b(?:ppm|dkh|dgh|mg\/?l)\b/g, " "); // drop stray unit words
+  base = base.replace(/[^a-z0-9]+/g, " ").trim();
+  return base;
+}
 
-  return { latest: latest.value, direction, series: series.slice(-8).map((point) => point.value) };
+// Collapse correlated parameters to the one measured most recently, keeping the
+// original parameter order for everything shown.
+function summaryParameters() {
+  const winners = new Set();
+  const groups = new Map();
+
+  state.parameters.forEach((parameter) => {
+    const key = measurementKey(parameter) || `id:${parameter.id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(parameter);
+  });
+
+  groups.forEach((members) => {
+    let best = members[0];
+    let bestTime = latestReadingTime(best.id);
+    members.slice(1).forEach((member) => {
+      const time = latestReadingTime(member.id);
+      if (bestTime === null || (time !== null && time > bestTime)) {
+        best = member;
+        bestTime = time;
+      }
+    });
+    winners.add(best.id);
+  });
+
+  return state.parameters.filter((parameter) => winners.has(parameter.id));
+}
+
+function daysSince(time) {
+  if (!Number.isFinite(time)) return null;
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const measured = new Date(time);
+  measured.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((todayStart.getTime() - measured.getTime()) / 86400000));
+}
+
+function formatDaysSince(time) {
+  const days = daysSince(time);
+  if (days === null) return "";
+  if (days === 0) return "Today";
+  return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
 function renderParameterSummary() {
   if (!state.parameters.length) {
-    els.parameterSummaryTable.innerHTML = `<tr><td colspan="4">Add a parameter on the Log tab.</td></tr>`;
+    els.parameterSummaryTable.innerHTML = `<tr><td colspan="3">Add a parameter on the Log tab.</td></tr>`;
     return;
   }
 
-  els.parameterSummaryTable.innerHTML = state.parameters.map((parameter) => {
-    const trend = computeTrend(parameter.id);
+  els.parameterSummaryTable.innerHTML = summaryParameters().map((parameter) => {
+    const series = parameterSeries(parameter.id);
     const nameCell = `<span class="swatch-inline" style="background:${parameter.color}"></span>${escapeHtml(parameter.name)}`;
     const expanded = expandedParamId === parameter.id;
     const chartRow = expanded ? `
       <tr class="chart-row">
-        <td colspan="4">
+        <td colspan="3">
           <p class="chart-note">Shaded band is the target range · dashed lines mark water changes</p>
           <canvas id="paramChart-${parameter.id}" class="param-chart"></canvas>
         </td>
       </tr>
     ` : "";
 
-    if (!trend) {
+    if (!series.length) {
       return `
         <tr class="param-row" data-param-id="${parameter.id}">
           <td>${nameCell}</td>
-          <td colspan="3" class="muted-cell">No readings yet</td>
+          <td colspan="2" class="muted-cell">No readings yet</td>
         </tr>
         ${chartRow}
       `;
     }
 
-    const status = getStatus(parameter, trend.latest);
+    const latest = series[series.length - 1];
+    const status = getStatus(parameter, latest.value);
+    const since = formatDaysSince(latest.time);
     return `
       <tr class="param-row ${expanded ? "expanded" : ""}" data-param-id="${parameter.id}">
         <td>${nameCell}</td>
-        <td>${trend.latest}${parameter.unit ? ` ${escapeHtml(parameter.unit)}` : ""}</td>
+        <td class="latest-cell">
+          <span class="latest-value">${latest.value}${parameter.unit ? ` ${escapeHtml(parameter.unit)}` : ""}</span>
+          ${since ? `<span class="latest-since">${since}</span>` : ""}
+        </td>
         <td><span class="badge ${status.key}">${status.label}</span></td>
-        <td class="trend-cell">${sparkline(trend.series, parameter.color)}<span class="trend trend-${trend.direction}">${TREND_ICON[trend.direction]}</span></td>
       </tr>
       ${chartRow}
     `;
@@ -659,24 +708,6 @@ function renderParameterSummary() {
     const canvas = document.getElementById(`paramChart-${expandedParamId}`);
     if (parameter && canvas) drawParamChart(canvas, parameter);
   }
-}
-
-function sparkline(values, color) {
-  if (values.length < 2) return "";
-  const width = 64;
-  const height = 22;
-  const pad = 3;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max === min ? 1 : max - min;
-
-  const points = values.map((value, index) => {
-    const x = pad + (index / (values.length - 1)) * (width - pad * 2);
-    const y = height - pad - ((value - min) / range) * (height - pad * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-
-  return `<svg class="sparkline" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true"><polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 /* ---------- parameter trend chart ---------- */
