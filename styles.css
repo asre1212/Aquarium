@@ -287,6 +287,8 @@ textarea {
   color: var(--ink);
   outline: 0;
   padding: 10px 11px;
+  /* Keep at 16px+ so iOS Safari does not zoom the page when a field gains focus. */
+  font-size: 16px;
 }
 
 input:focus,
@@ -430,25 +432,25 @@ table {
   background: #f8fbfa;
 }
 
-.sparkline {
-  display: inline-block;
-  vertical-align: middle;
-}
-
 .muted-cell {
   color: var(--muted);
 }
 
-.trend-cell {
-  white-space: nowrap;
+.latest-cell {
+  line-height: 1.25;
 }
 
-.trend {
-  display: inline-block;
-  margin-left: 8px;
+.latest-value {
+  display: block;
+  font-weight: 700;
+}
+
+.latest-since {
+  display: block;
+  margin-top: 2px;
   color: var(--muted);
-  font-size: 0.8rem;
-  vertical-align: middle;
+  font-size: 0.72rem;
+  font-weight: 600;
 }
 
 th,
