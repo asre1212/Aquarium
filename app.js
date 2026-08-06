@@ -31,6 +31,33 @@ const EVENT_TYPES = {
   }
 };
 
+// Sky and Sky+ are the mineral powders dosed into RO water to bring hardness
+// up. The three presets are the water changes actually done on this tank; the
+// gallons/percent pairs all pin the effective water volume at about 13.3 gal.
+const WATER_CHANGE_PRESETS = [
+  { label: "15%", gallons: 2, percent: 0.15 },
+  { label: "18%", gallons: 2.5, percent: 0.18 },
+  { label: "30%", gallons: 4, percent: 0.3 }
+];
+
+const TANK_GALLONS = median(WATER_CHANGE_PRESETS.map((preset) => preset.gallons / preset.percent));
+
+// Order matters: the "sky +" patterns run first so a plain "sky" pattern can
+// never swallow a Sky+ amount. Each match is blanked out once counted.
+// The (?!\.?\d) guards stop a decimal being clipped short, and the trailing
+// volume guards keep "sky 2.5 gal" from reading as 2 grams of Sky.
+const MINERAL_PATTERNS = [
+  { key: "skyPlus", re: /sky\s*\+[\s:=-]*(\d+(?:\.\d+)?)(?!\.?\d)\s*(?:grams?|g)?\b(?!\s*(?:gal|gallons?|%))/gi },
+  { key: "skyPlus", re: /(\d+(?:\.\d+)?)(?!\.?\d)\s*(?:grams?|g)?\s*(?:of\s+)?sky\s*\+/gi },
+  { key: "sky", re: /sky(?!\s*\+)[\s:=-]*(\d+(?:\.\d+)?)(?!\.?\d)\s*(?:grams?|g)?\b(?!\s*(?:gal|gallons?|%))/gi },
+  { key: "sky", re: /(\d+(?:\.\d+)?)(?!\.?\d)\s*(?:grams?|g)?\s*(?:of\s+)?sky\b(?!\s*\+)/gi }
+];
+
+// How many of the most recent usable water changes feed the dose calibration.
+const CALIBRATION_SAMPLES = 10;
+const BEFORE_WINDOW_MS = 14 * 86400000;
+const AFTER_WINDOW_MS = 4 * 86400000;
+
 const READING_ICON = '<path d="M4 19h16M4 15l4-4 4 3 4-6 4 3"/>';
 const TRASH_ICON = '<path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/>';
 const EDIT_ICON = '<path d="M12 20h9M16.7 3.3a2.2 2.2 0 0 1 3.1 3.1L7 19.2 3 20l.8-4L16.7 3.3z"/>';
@@ -65,6 +92,10 @@ const els = {
   eventSubmitButton: document.getElementById("eventSubmitButton"),
   cancelEventEdit: document.getElementById("cancelEventEdit"),
   parameterSummaryTable: document.getElementById("parameterSummaryTable"),
+  mineralSuggestionTable: document.getElementById("mineralSuggestionTable"),
+  mineralContext: document.getElementById("mineralContext"),
+  mineralBasis: document.getElementById("mineralBasis"),
+  refreshMinerals: document.getElementById("refreshMinerals"),
   timelineList: document.getElementById("timelineList"),
   resetTimeline: document.getElementById("resetTimeline"),
   notesArea: document.getElementById("notesArea"),
@@ -113,6 +144,7 @@ function initialise() {
   els.importFile.addEventListener("change", importData);
   els.exportData.addEventListener("click", exportData);
   els.resetTimeline.addEventListener("click", resetTimeline);
+  els.refreshMinerals.addEventListener("click", renderMineralSuggestions);
   els.notesArea.addEventListener("input", saveNotes);
   els.toastUndo.addEventListener("click", undoLastAction);
 
@@ -500,6 +532,7 @@ function render() {
   renderParameterList();
   renderReadingInputs();
   renderParameterSummary();
+  renderMineralSuggestions();
   renderTimeline();
 }
 
@@ -708,6 +741,254 @@ function renderParameterSummary() {
     const canvas = document.getElementById(`paramChart-${expandedParamId}`);
     if (parameter && canvas) drawParamChart(canvas, parameter);
   }
+}
+
+/* ---------- mineral dose suggestions ---------- */
+
+/*
+ * Water changes on RO water dilute the tank and add hardness back with the
+ * mineral powders. For a change that swaps a fraction f of the tank:
+ *
+ *   gh_after = gh_before * (1 - f) + (potency * grams) / tank_gallons
+ *
+ * where potency is dGH-gallons delivered per gram. Every water change in the
+ * timeline that logs its volume and its grams, with a GH reading on either
+ * side, gives one measurement of potency. Rearranged for the dose:
+ *
+ *   grams = tank_gallons * (target - gh_now * (1 - f)) / potency
+ */
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function eventText(event) {
+  return `${event.title || ""} ${event.details || ""}`;
+}
+
+function parseMineralGrams(text) {
+  let source = String(text || "");
+  const grams = { sky: 0, skyPlus: 0 };
+
+  MINERAL_PATTERNS.forEach(({ key, re }) => {
+    source = source.replace(re, (match, amount) => {
+      const value = Number(amount);
+      if (Number.isFinite(value)) grams[key] += value;
+      return " ".repeat(match.length);
+    });
+  });
+
+  grams.total = grams.sky + grams.skyPlus;
+  return grams;
+}
+
+// Fraction of the tank swapped, from either "2.5 gal" or "18%".
+function changeFraction(text) {
+  const source = String(text || "");
+
+  const gallons = source.match(/(\d+(?:\.\d+)?)\s*(?:gallons?|gals?)\b/i);
+  if (gallons) return validFraction(Number(gallons[1]) / TANK_GALLONS);
+
+  const percent = source.match(/(\d+(?:\.\d+)?)\s*%/);
+  if (percent) return validFraction(Number(percent[1]) / 100);
+
+  return null;
+}
+
+function validFraction(value) {
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : null;
+}
+
+function isHardnessParameter(parameter) {
+  const name = String(parameter.name || "").toLowerCase();
+  const general = /\bd?gh\b|general hardness/.test(name);
+  if (!general && /\bd?kh\b|carbonate|alkalin/.test(name)) return false;
+  return general || /hardness/.test(name);
+}
+
+// The GH parameter to work from — if GH is logged in more than one unit, take
+// whichever one was measured most recently.
+function hardnessParameter() {
+  const candidates = state.parameters.filter(isHardnessParameter);
+  if (!candidates.length) return null;
+
+  return candidates.reduce((best, candidate) => {
+    const bestTime = latestReadingTime(best.id);
+    const time = latestReadingTime(candidate.id);
+    if (bestTime === null) return time === null ? best : candidate;
+    return time !== null && time > bestTime ? candidate : best;
+  });
+}
+
+function hardnessTarget(parameter) {
+  if (parameter.low !== null && parameter.high !== null) return (parameter.low + parameter.high) / 2;
+  if (parameter.high !== null) return parameter.high;
+  if (parameter.low !== null) return parameter.low;
+  return null;
+}
+
+// One usable data point per water change: volume + grams + a GH reading before
+// and after, with nothing in between that would muddy the result.
+function calibrationSamples(parameter) {
+  const series = parameterSeries(parameter.id);
+  const changes = state.events
+    .filter((event) => event.type === "waterChange")
+    .map((event) => ({ ...event, at: itemTime(event) }))
+    .filter((event) => Number.isFinite(event.at))
+    .sort((a, b) => a.at - b.at);
+
+  const doses = state.events
+    .filter((event) => event.type === "dosing")
+    .map((event) => ({ ...event, at: itemTime(event), grams: parseMineralGrams(eventText(event)) }))
+    .filter((event) => Number.isFinite(event.at) && event.grams.total > 0);
+
+  const samples = [];
+
+  changes.forEach((change, index) => {
+    const fraction = changeFraction(eventText(change));
+    if (!fraction) return;
+
+    // Grams are usually written on the water change itself, but a separate
+    // dosing entry on the same day counts towards the same batch of new water.
+    const grams = parseMineralGrams(eventText(change));
+    doses
+      .filter((dose) => dose.date === change.date)
+      .forEach((dose) => {
+        grams.sky += dose.grams.sky;
+        grams.skyPlus += dose.grams.skyPlus;
+      });
+    grams.total = grams.sky + grams.skyPlus;
+    if (grams.total <= 0) return;
+
+    const previous = changes[index - 1];
+    const next = changes[index + 1];
+
+    const before = [...series].reverse().find((point) => point.time <= change.at
+      && change.at - point.time <= BEFORE_WINDOW_MS
+      && (!previous || point.time >= previous.at));
+    const after = series.find((point) => point.time > change.at
+      && point.time - change.at <= AFTER_WINDOW_MS
+      && (!next || point.time < next.at));
+    if (!before || !after) return;
+
+    // A mineral dose straight into the tank between the two readings would be
+    // credited to this water change, so drop the sample instead.
+    const confounded = doses.some((dose) => dose.date !== change.date && dose.at > change.at && dose.at <= after.time);
+    if (confounded) return;
+
+    const delivered = TANK_GALLONS * (after.value - before.value * (1 - fraction));
+    if (!(delivered > 0)) return;
+
+    samples.push({ date: change.date, fraction, grams, delivered });
+  });
+
+  return samples.slice(-CALIBRATION_SAMPLES);
+}
+
+// Least squares through the origin: the dose that best explains every sample.
+function mineralCalibration(parameter) {
+  const samples = calibrationSamples(parameter);
+  if (!samples.length) return null;
+
+  const weighted = samples.reduce((sum, sample) => sum + sample.grams.total * sample.delivered, 0);
+  const squares = samples.reduce((sum, sample) => sum + sample.grams.total ** 2, 0);
+  const potency = squares > 0 ? weighted / squares : 0;
+  if (!(potency > 0)) return null;
+
+  const totalGrams = samples.reduce((sum, sample) => sum + sample.grams.total, 0);
+  const skyGrams = samples.reduce((sum, sample) => sum + sample.grams.sky, 0);
+
+  return { potency, skyShare: totalGrams > 0 ? skyGrams / totalGrams : 1, samples };
+}
+
+function mineralSuggestions(parameter, target, current, calibration) {
+  return WATER_CHANGE_PRESETS.map((preset) => {
+    const fraction = validFraction(preset.gallons / TANK_GALLONS) ?? preset.percent;
+    const needed = TANK_GALLONS * (target - current * (1 - fraction));
+    const total = needed > 0 ? needed / calibration.potency : 0;
+    return {
+      preset,
+      total,
+      sky: total * calibration.skyShare,
+      skyPlus: total * (1 - calibration.skyShare),
+      newWaterGh: (calibration.potency * total) / preset.gallons
+    };
+  });
+}
+
+function renderMineralSuggestions() {
+  const parameter = hardnessParameter();
+  if (!parameter) {
+    showMineralMessage("Add a GH (hardness) parameter on the Log tab to get dose suggestions.");
+    return;
+  }
+
+  const target = hardnessTarget(parameter);
+  if (target === null) {
+    showMineralMessage(`Give ${parameter.name} a low and high range so there is a target to aim at.`);
+    return;
+  }
+
+  const series = parameterSeries(parameter.id);
+  if (!series.length) {
+    showMineralMessage(`Log a ${parameter.name} reading to get dose suggestions.`);
+    return;
+  }
+
+  const calibration = mineralCalibration(parameter);
+  if (!calibration) {
+    showMineralMessage(
+      "Not enough history yet. Log each water change with its volume and grams — "
+      + `e.g. "2.5 gal · sky 4g · sky+ 2g" — with a ${parameter.name} reading before and after it.`
+    );
+    return;
+  }
+
+  const latest = series[series.length - 1];
+  const suggestions = mineralSuggestions(parameter, target, latest.value, calibration);
+  const unit = parameter.unit ? ` ${parameter.unit}` : "";
+  const since = formatDaysSince(latest.time);
+  const alreadyThere = suggestions.every((suggestion) => suggestion.total <= 0);
+
+  els.mineralContext.textContent = `Now ${trimNumber(latest.value)}${unit}${since ? ` (${since.toLowerCase()})` : ""}`
+    + ` · target ${trimNumber(target)}${unit} · range ${formatRange(parameter)}`;
+
+  els.mineralSuggestionTable.innerHTML = suggestions.map((suggestion) => `
+    <tr>
+      <td class="latest-cell">
+        <span class="latest-value">${suggestion.preset.label}</span>
+        <span class="latest-since">${trimNumber(suggestion.preset.gallons)} gal</span>
+      </td>
+      <td class="dose-cell">${formatGrams(suggestion.sky, calibration.skyShare > 0)}</td>
+      <td class="dose-cell">${formatGrams(suggestion.skyPlus, calibration.skyShare < 1)}</td>
+      <td class="muted-cell">${trimNumber(suggestion.newWaterGh)}${unit}</td>
+    </tr>
+  `).join("");
+
+  const perGallon = calibration.potency / TANK_GALLONS;
+  const blend = `${Math.round(calibration.skyShare * 100)}% Sky / ${Math.round((1 - calibration.skyShare) * 100)}% Sky+`;
+  els.mineralBasis.textContent = [
+    alreadyThere
+      ? `Already at or above target — a plain RO change brings ${parameter.name} down on its own.`
+      : "New water is the hardness the change water itself should mix to.",
+    `From ${calibration.samples.length} water change${calibration.samples.length === 1 ? "" : "s"}:`
+      + ` 1 g ≈ ${trimNumber(perGallon)}${unit} across ${trimNumber(TANK_GALLONS)} gal, blended ${blend}.`,
+    `Updated ${new Date().toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}.`
+  ].join(" ");
+}
+
+function showMineralMessage(message) {
+  els.mineralContext.textContent = "";
+  els.mineralBasis.textContent = "";
+  els.mineralSuggestionTable.innerHTML = `<tr><td colspan="4" class="muted-cell">${escapeHtml(message)}</td></tr>`;
+}
+
+function formatGrams(value, used) {
+  if (!used) return "—";
+  return `${Math.max(0, value).toFixed(1)} g`;
 }
 
 /* ---------- parameter trend chart ---------- */
