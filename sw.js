@@ -1,4 +1,4 @@
-const CACHE_NAME = "aquarium-log-v1";
+const CACHE_NAME = "aquarium-log-v2";
 const ASSETS = [
   "./",
   "./index.html",

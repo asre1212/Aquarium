@@ -436,6 +436,29 @@ table {
   color: var(--muted);
 }
 
+.panel-note {
+  margin: 0;
+  padding: 8px 14px 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.panel-note.footnote {
+  padding: 10px 14px 14px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.panel-note:empty {
+  display: none;
+}
+
+.dose-cell {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
 .latest-cell {
   line-height: 1.25;
 }
