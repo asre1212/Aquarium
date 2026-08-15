@@ -751,9 +751,11 @@ function renderParameterSummary() {
  *
  *   gh_after = gh_before * (1 - f) + (potency * grams) / tank_gallons
  *
- * where potency is dGH-gallons delivered per gram. Every water change in the
- * timeline that logs its volume and its grams, with a GH reading on either
- * side, gives one measurement of potency. Rearranged for the dose:
+ * where potency is dGH-gallons delivered per gram. A straight dose into the
+ * tank is the same equation with f = 0 — nothing is diluted, the minerals just
+ * go in — so water changes and adjustment doses calibrate from one formula.
+ * Any of them logged with its grams and a GH reading either side measures
+ * potency once. Rearranged for the dose:
  *
  *   grams = tank_gallons * (target - gh_now * (1 - f)) / potency
  */
@@ -830,59 +832,77 @@ function hardnessTarget(parameter) {
   return null;
 }
 
-// One usable data point per water change: volume + grams + a GH reading before
-// and after, with nothing in between that would muddy the result.
-function calibrationSamples(parameter) {
-  const series = parameterSeries(parameter.id);
+// Everything in the timeline that moved hardness, in order: water changes
+// (dilute and re-mineralise) and adjustment doses straight into the tank (add
+// only, so fraction 0). Anything mentioning Sky is listed even when its grams
+// or volume are unreadable, because it still perturbs GH and so has to bound
+// its neighbours' readings.
+function hardnessAdjustments() {
   const changes = state.events
     .filter((event) => event.type === "waterChange")
-    .map((event) => ({ ...event, at: itemTime(event) }))
-    .filter((event) => Number.isFinite(event.at))
-    .sort((a, b) => a.at - b.at);
+    .map((event) => ({
+      at: itemTime(event),
+      date: event.date,
+      kind: "change",
+      fraction: changeFraction(eventText(event)),
+      grams: parseMineralGrams(eventText(event))
+    }))
+    .filter((change) => Number.isFinite(change.at));
+
+  const changeDates = new Set(changes.map((change) => change.date));
 
   const doses = state.events
-    .filter((event) => event.type === "dosing")
-    .map((event) => ({ ...event, at: itemTime(event), grams: parseMineralGrams(eventText(event)) }))
-    .filter((event) => Number.isFinite(event.at) && event.grams.total > 0);
+    .filter((event) => event.type === "dosing" && /sky/i.test(eventText(event)))
+    .map((event) => ({
+      at: itemTime(event),
+      date: event.date,
+      kind: "dose",
+      fraction: 0,
+      grams: parseMineralGrams(eventText(event))
+    }))
+    .filter((dose) => Number.isFinite(dose.at));
 
+  // A dose logged the same day as a water change went into that batch of new
+  // water rather than into the tank, so it belongs to the change.
+  doses
+    .filter((dose) => changeDates.has(dose.date))
+    .forEach((dose) => {
+      const change = changes.find((item) => item.date === dose.date);
+      change.grams.sky += dose.grams.sky;
+      change.grams.skyPlus += dose.grams.skyPlus;
+    });
+
+  return [...changes, ...doses.filter((dose) => !changeDates.has(dose.date))]
+    .map((item) => ({ ...item, grams: { ...item.grams, total: item.grams.sky + item.grams.skyPlus } }))
+    .sort((a, b) => a.at - b.at);
+}
+
+// One usable data point per adjustment: grams, a known fraction, and a GH
+// reading either side of it. The neighbouring adjustments bound those readings
+// so nothing else that moved hardness gets credited to this one.
+function calibrationSamples(parameter) {
+  const series = parameterSeries(parameter.id);
+  const adjustments = hardnessAdjustments();
   const samples = [];
 
-  changes.forEach((change, index) => {
-    const fraction = changeFraction(eventText(change));
-    if (!fraction) return;
+  adjustments.forEach((adjustment, index) => {
+    if (adjustment.fraction === null || adjustment.grams.total <= 0) return;
 
-    // Grams are usually written on the water change itself, but a separate
-    // dosing entry on the same day counts towards the same batch of new water.
-    const grams = parseMineralGrams(eventText(change));
-    doses
-      .filter((dose) => dose.date === change.date)
-      .forEach((dose) => {
-        grams.sky += dose.grams.sky;
-        grams.skyPlus += dose.grams.skyPlus;
-      });
-    grams.total = grams.sky + grams.skyPlus;
-    if (grams.total <= 0) return;
+    const previous = adjustments[index - 1];
+    const next = adjustments[index + 1];
 
-    const previous = changes[index - 1];
-    const next = changes[index + 1];
-
-    const before = [...series].reverse().find((point) => point.time <= change.at
-      && change.at - point.time <= BEFORE_WINDOW_MS
+    const before = [...series].reverse().find((point) => point.time <= adjustment.at
+      && adjustment.at - point.time <= BEFORE_WINDOW_MS
       && (!previous || point.time >= previous.at));
-    const after = series.find((point) => point.time > change.at
-      && point.time - change.at <= AFTER_WINDOW_MS
+    const after = series.find((point) => point.time > adjustment.at
+      && point.time - adjustment.at <= AFTER_WINDOW_MS
       && (!next || point.time < next.at));
     if (!before || !after) return;
 
-    // A mineral dose straight into the tank between the two readings would be
-    // credited to this water change, so drop the sample instead.
-    const confounded = doses.some((dose) => dose.date !== change.date && dose.at > change.at && dose.at <= after.time);
-    if (confounded) return;
-
-    const delivered = TANK_GALLONS * (after.value - before.value * (1 - fraction));
+    const delivered = TANK_GALLONS * (after.value - before.value * (1 - adjustment.fraction));
     if (!(delivered > 0)) return;
 
-    samples.push({ date: change.date, fraction, grams, delivered });
+    samples.push({ date: adjustment.date, kind: adjustment.kind, grams: adjustment.grams, delivered });
   });
 
   return samples.slice(-CALIBRATION_SAMPLES);
@@ -941,8 +961,9 @@ function renderMineralSuggestions() {
   const calibration = mineralCalibration(parameter);
   if (!calibration) {
     showMineralMessage(
-      "Not enough history yet. Log each water change with its volume and grams — "
-      + `e.g. "2.5 gal · sky 4g · sky+ 2g" — with a ${parameter.name} reading before and after it.`
+      `Not enough history yet. Either log a water change with its volume and grams — e.g. "2.5 gal · sky 4g · sky+ 2g" — `
+      + `or dose the tank on its own and log it as Dosing — e.g. "sky 2g". Both need a ${parameter.name} reading before and after; `
+      + "a day or two apart is fine."
     );
     return;
   }
@@ -974,7 +995,7 @@ function renderMineralSuggestions() {
     alreadyThere
       ? `Already at or above target — a plain RO change brings ${parameter.name} down on its own.`
       : "New water is the hardness the change water itself should mix to.",
-    `From ${calibration.samples.length} water change${calibration.samples.length === 1 ? "" : "s"}:`
+    `From ${formatCalibrationBasis(calibration.samples)}:`
       + ` 1 g ≈ ${trimNumber(perGallon)}${unit} across ${trimNumber(TANK_GALLONS)} gal, blended ${blend}.`,
     `Updated ${new Date().toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}.`
   ].join(" ");
@@ -984,6 +1005,15 @@ function showMineralMessage(message) {
   els.mineralContext.textContent = "";
   els.mineralBasis.textContent = "";
   els.mineralSuggestionTable.innerHTML = `<tr><td colspan="4" class="muted-cell">${escapeHtml(message)}</td></tr>`;
+}
+
+function formatCalibrationBasis(samples) {
+  const changes = samples.filter((sample) => sample.kind === "change").length;
+  const doses = samples.length - changes;
+  const parts = [];
+  if (changes) parts.push(`${changes} water change${changes === 1 ? "" : "s"}`);
+  if (doses) parts.push(`${doses} dose${doses === 1 ? "" : "s"}`);
+  return parts.join(" and ");
 }
 
 function formatGrams(value, used) {
